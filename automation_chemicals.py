@@ -1,4 +1,3 @@
-import os
 
 def generate_sds_line(chemical_name, cas_number):
     return f"\\addSDS{{{chemical_name} - {cas_number}}}{{SDS/{cas_number}-{chemical_name}-SDS}}\n"
