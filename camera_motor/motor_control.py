@@ -75,7 +75,7 @@ def main():
         # Home the actuator
         home_actuator()
         
-        # Calibrate the actuator (optional)
+        # Calibrate the actuator 
         calibrate_actuator()
         
         while True:
