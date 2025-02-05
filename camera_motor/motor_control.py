@@ -30,9 +30,9 @@ def move_stepper(steps, direction):
     # Generate step pulses
     for _ in range(steps):
         ljm.eWriteName(handle, f"DIO{STEP_PIN}", 1)  # Step high
-        time.sleep(0.001)  # Pulse width (adjust as needed)
+        time.sleep(0.0005)  # Pulse width (adjust as needed)
         ljm.eWriteName(handle, f"DIO{STEP_PIN}", 0)  # Step low
-        time.sleep(0.001)  # Delay between steps (adjust for speed)
+        time.sleep(0.0005)  # Delay between steps (adjust for speed)
     
     # Update current position
     current_position += steps if direction else -steps
@@ -55,28 +55,14 @@ def home_actuator():
     print("Home position reached.")
     current_position = 0  # Reset current position to 0
 
-def calibrate_actuator():
-    #Calibrate the actuator by moving it a known distance and calculating steps per mm.
-    global steps_per_mm
-    known_distance_mm = 100  # Example: Move 100 mm for calibration
-    print(f"Calibrating actuator over {known_distance_mm} mm...")
-    
-    # Move the actuator forward
-    steps_to_move = int(known_distance_mm * steps_per_mm)
-    move_stepper(steps_to_move, 1)
-    
-    # Update steps_per_mm based on the actual distance moved
-    actual_distance_mm = known_distance_mm  # Replace with measured distance if available
-    steps_per_mm = steps_to_move / actual_distance_mm
-    print(f"Calibration complete. Steps per mm: {steps_per_mm}")
 
 def main():
     try:
         # Home the actuator
         home_actuator()
         
-        # Calibrate the actuator 
-        calibrate_actuator()
+        # Calibrate the actuator (need to fill in)
+        
         
         while True:
             # Prompt user for input
@@ -95,7 +81,7 @@ def main():
                 print(f"Moved {distance_mm} mm {'forward' if direction else 'backward'}. Current position: {current_position} steps")
             
             except ValueError:
-                print("Invalid input. Please enter a valid distance in mm.")
+                print("Invalid input. Please enter a valid distance in mm.") 
     
     except KeyboardInterrupt:
         print("Program terminated by user.")
