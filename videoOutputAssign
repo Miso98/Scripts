@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# List all video devices and their friendly names
+echo "Available video devices:"
+for dev in /dev/video*; do
+    if [[ -e "$dev" ]]; then
+        name=$(v4l2-ctl -d "$dev" --info | grep "Driver name" | awk -F: '{print $2}' | xargs)
+        echo "$dev - $name"
+    fi
+done
+
+# Prompt for video device
+read -p "Enter the video device you want to configure (e.g., /dev/video6): " DEVICE
+
+# Validate device
+if [[ ! -e "$DEVICE" ]]; then
+    echo "Error: $DEVICE does not exist."
+    exit 1
+fi
+
+# List available inputs
+echo "Available inputs for $DEVICE:"
+v4l2-ctl -d "$DEVICE" --list-inputs
+
+# Prompt for input index
+read -p "Enter the input index to set (e.g., 1 for DVI): " INPUT_INDEX
+
+# Set the input
+echo "Setting $DEVICE to input index $INPUT_INDEX..."
+v4l2-ctl -d "$DEVICE" -i "$INPUT_INDEX"
+
+# Confirm the change
+if [ $? -eq 0 ]; then
+    echo "Successfully set $DEVICE to input $INPUT_INDEX."
+else
+    echo "Failed to set input. Please check if the device and index are correct."
+fi
