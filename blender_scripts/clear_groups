@@ -1,0 +1,7 @@
+import bpy
+
+obj = bpy.data.objects['Femur-model-frame']
+
+obj.vertex_groups.clear()
+
+print("All vertex groups removed.")
