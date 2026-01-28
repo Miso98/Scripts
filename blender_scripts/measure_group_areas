@@ -23,11 +23,10 @@ for v in mesh.vertices:
     for g in v.groups:
         vert_groups[v.index].add(g.group)
 
+# Calculate areas
 areas = {}
-
 for vg in obj.vertex_groups:
     vg_area = 0.0
-
     for face in bm.faces:
         face_vert_indices = [v.index for v in face.verts]
 
@@ -42,7 +41,7 @@ bm.free()
 # Save JSON (same pattern as your S6 export)
 out_path = os.path.join(
     bpy.path.abspath("//"),
-    obj.name + "-S3-areas.json"
+    obj.name + "-S2-areas.json"
 )
 
 with open(out_path, "w") as f:
