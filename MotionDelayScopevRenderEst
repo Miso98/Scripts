@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""
+Latency measurement between stacked videos (top=render, bottom=scope)
+with large-motion blob detection and visual overlay of detected motion peaks.
+
+Requirements:
+    pip install opencv-python numpy matplotlib scipy
+"""
+
+import cv2
+import numpy as np
+from scipy.signal import correlate
+import os
+
+# ---------------- CONFIG -----------------
+video_path = "/home/mitchell/Documents/delaytest.mp4"
+output_video_path = "/home/mitchell/Documents/latency_visual.mp4"
+bar_h = 2
+roi_downsample_width = 400
+farneback_winsize = 35
+min_blob_pixels = 20        # minimum connected pixels to consider motion
+min_blob_motion_px = 3.0    # minimum horizontal displacement (px) to be a real motion event
+local_corr_window = 20       # frames around peak for lag calculation
+prominence_window = 50
+prominence_fraction = 0.3
+# -----------------------------------------
+
+# --- Check video exists ---
+if not os.path.exists(video_path):
+    raise FileNotFoundError(f"Video not found: {video_path}")
+
+cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    raise RuntimeError(f"Failed to open video: {video_path}")
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+ret, first_frame = cap.read()
+if not ret or first_frame is None:
+    raise RuntimeError("Failed to read first frame from video")
+
+video_h, video_w, _ = first_frame.shape
+
+# --- Assign ROIs ---
+top_video_h = (video_h - bar_h) // 2
+bottom_video_h = (video_h - bar_h) - top_video_h
+
+render_roi = (0, 0, video_w, top_video_h)            # top = render
+scope_roi  = (0, top_video_h + bar_h, video_w, bottom_video_h)  # bottom = scope
+
+print(f"Render ROI: {render_roi}")
+print(f"Scope ROI: {scope_roi}")
+
+# --- Helper functions ---
+def extract_gray(frame, roi, downsample_width=None):
+    x, y, w, h = roi
+    roi_frame = frame[y:y+h, x:x+w]
+    gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+    scale = 1.0
+    if downsample_width and w > downsample_width:
+        scale = downsample_width / w
+        gray = cv2.resize(gray, (0,0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+    return gray, scale, roi_frame
+
+def compute_optical_flow(prev, curr, scale=1.0):
+    flow = cv2.calcOpticalFlowFarneback(prev, curr, None,
+                                        pyr_scale=0.5, levels=3, winsize=farneback_winsize,
+                                        iterations=3, poly_n=5, poly_sigma=1.2,
+                                        flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
+    horiz = flow[...,0] / scale
+    return horiz
+
+def detect_large_motion(flow, min_pixels=min_blob_pixels, min_motion=min_blob_motion_px):
+    mask = np.abs(flow) >= min_motion
+    mask = mask.astype(np.uint8)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    blobs = []
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] >= min_pixels:
+            mean_motion = np.mean(flow[labels==i])
+            blobs.append((mean_motion, stats[i]))
+    if len(blobs) == 0:
+        return 0.0, []
+    # Return mean motion of largest blob (by abs value) and all its bounding boxes
+    largest_idx = np.argmax([abs(b[0]) for b in blobs])
+    return blobs[largest_idx][0], [b[1] for b in blobs]
+
+# --- Initialize ---
+prev_scope, scale_scope, _ = extract_gray(first_frame, scope_roi, roi_downsample_width)
+prev_render, scale_render, _ = extract_gray(first_frame, render_roi, roi_downsample_width)
+
+scope_signal = []
+render_signal = []
+
+frame_idx = 0
+
+# Prepare video writer for overlay output
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter(output_video_path, fourcc, fps, (video_w, video_h))
+
+all_blob_boxes = []  # store per frame for visualization
+
+cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # reset to first frame
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    scope_gray, _, scope_crop = extract_gray(frame, scope_roi, roi_downsample_width)
+    render_gray, _, render_crop = extract_gray(frame, render_roi, roi_downsample_width)
+
+    # Optical flow
+    scope_flow = compute_optical_flow(prev_scope, scope_gray, scale=scale_scope)
+    render_flow = compute_optical_flow(prev_render, render_gray, scale=scale_render)
+
+    # Detect large motion blobs
+    scope_motion, scope_blobs = detect_large_motion(scope_flow, min_blob_pixels, min_blob_motion_px)
+    render_motion, render_blobs = detect_large_motion(render_flow, min_blob_pixels, min_blob_motion_px)
+
+    scope_signal.append(scope_motion)
+    render_signal.append(render_motion)
+    all_blob_boxes.append((scope_blobs, render_blobs))
+
+    # --- Draw overlays ---
+    vis_frame = frame.copy()
+
+    # Draw scope blobs (bottom)
+    for blob_stats in scope_blobs:
+        x, y, w, h, area = blob_stats
+        cv2.rectangle(vis_frame, (x, y + render_roi[3] + bar_h), (x + w, y + h + render_roi[3] + bar_h), (0,255,0), 2)
+
+    # Draw render blobs (top)
+    for blob_stats in render_blobs:
+        x, y, w, h, area = blob_stats
+        cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (255,0,0), 2)
+
+    out.write(vis_frame)
+
+    prev_scope = scope_gray
+    prev_render = render_gray
+    frame_idx += 1
+
+cap.release()
+out.release()
+
+scope_signal = np.array(scope_signal)
+render_signal = np.array(render_signal)
+
+# --- Sliding-window adaptive prominence ---
+all_peaks = []
+signal_abs = np.abs(render_signal)
+for start in range(0, len(signal_abs), prominence_window):
+    end = min(len(signal_abs), start + prominence_window)
+    local_sig = signal_abs[start:end]
+    if len(local_sig) == 0:
+        continue
+    local_prominence = prominence_fraction * (np.max(local_sig) - np.min(local_sig))
+    if local_prominence < 1e-3:
+        continue
+    peaks = np.where((local_sig[1:-1] > local_sig[:-2]) & (local_sig[1:-1] > local_sig[2:]))[0] + 1
+    peaks = [p for p in peaks if local_sig[p] - np.min(local_sig) >= local_prominence]
+    all_peaks.extend([p + start for p in peaks])
+
+all_peaks = np.array(all_peaks)
+
+# --- Compute local lag per peak, ignore positive lags ---
+local_lags = []
+for peak in all_peaks:
+    start = max(0, peak - local_corr_window)
+    end = min(len(scope_signal), peak + local_corr_window)
+    local_scope = scope_signal[start:end]
+    local_render = render_signal[start:end]
+
+    corr = np.correlate(local_render, local_scope, mode="full")
+    lags = np.arange(-len(local_scope)+1, len(local_scope))
+    peak_idx = np.argmax(corr)
+    local_lag = lags[peak_idx]
+
+    # sub-frame interpolation
+    if 0 < peak_idx < len(corr)-1:
+        y0, y1, y2 = corr[peak_idx-1], corr[peak_idx], corr[peak_idx+1]
+        local_lag += 0.5 * (y0 - y2) / (y0 - 2*y1 + y2)
+
+    # Only negative lag
+    if local_lag <= 0:
+        local_lags.append(local_lag)
+
+# --- Compute final latency ---
+if len(local_lags) == 0:
+    print("No valid motion peaks detected.")
+else:
+    local_lags = np.array(local_lags)
+    latency_frames = np.mean(local_lags)
+    latency_ms = (latency_frames / fps) * 1000
+    std_ms = (np.std(local_lags) / fps) * 1000
+    print(f"\nAverage latency (scope faster only): {latency_ms:.1f} ms ± {std_ms:.1f} ms ({latency_frames:.2f} frames)")
+
+# --- Plot motion signals with peak lines ---
+import matplotlib.pyplot as plt
+plt.figure(figsize=(12,4))
+plt.plot(scope_signal, label="Scope (bottom)")
+plt.plot(render_signal, label="Render (top)")
+for peak, lag in zip(all_peaks, local_lags):
+    plt.axvline(x=peak - lag, color='red', linestyle='--', alpha=0.5)
+plt.xlabel("Frame index")
+plt.ylabel("Mean horizontal motion (px of largest blob)")
+plt.title(f"Scope vs Render | Avg latency = {latency_ms:.1f} ms ± {std_ms:.1f} ms")
+plt.legend()
+plt.tight_layout()
+plt.show()
