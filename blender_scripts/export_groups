@@ -1,0 +1,16 @@
+import bpy
+import json
+import os
+
+obj = bpy.data.objects['Femur-model-frame'] ## !! Change according to your object name in Blender
+print(obj.name, len(obj.data.vertices))
+labels = {}
+
+for vg in obj.vertex_groups:
+    labels[vg.name] = [v.index for v in obj.data.vertices if any(g.group == vg.index for g in v.groups)]
+
+out_path = os.path.join(bpy.path.abspath("//"), obj.name + "-S1.json")
+with open(out_path, "w") as f:
+    json.dump(labels, f)
+
+print("Exported:", out_path)
