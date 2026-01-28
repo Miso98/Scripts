@@ -1,0 +1,23 @@
+import bpy
+import json
+import os
+
+obj = bpy.data.objects['Femur-model-frame']
+
+json_path = os.path.join(
+    bpy.path.abspath("//"),
+    "Femur-ROIs-Schema-S3.json"
+)
+
+with open(json_path, "r") as f:
+    labels = json.load(f)
+
+# Clear existing groups (optional but recommended)
+obj.vertex_groups.clear()
+
+# Create vertex groups
+for name, indices in labels.items():
+    vg = obj.vertex_groups.new(name=name)
+    vg.add(indices, 1.0, 'ADD')
+
+print("Vertex groups imported from:", json_path)
