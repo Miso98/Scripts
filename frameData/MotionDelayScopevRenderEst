@@ -9,12 +9,19 @@ Requirements:
 
 import cv2
 import numpy as np
-from scipy.signal import correlate
+from scipy.signal import correlate, find_peaks
+from scipy.ndimage import gaussian_filter1d
 import os
+import argparse
+
+parser = argparse.ArgumentParser(description="Latency measurement between right-stacked videos")
+parser.add_argument("--input", default=os.path.expanduser("~/Downloads/delaytest.mp4"), help="Input video path")
+parser.add_argument("--output", default=os.path.expanduser("~/Downloads/latency_visual.mp4"), help="Output video path")
+args = parser.parse_args()
 
 # ---------------- CONFIG -----------------
-video_path = "/home/mitchell/Documents/delaytest.mp4"
-output_video_path = "/home/mitchell/Documents/latency_visual.mp4"
+video_path = args.input
+output_video_path = args.output
 bar_h = 2
 roi_downsample_width = 400
 farneback_winsize = 35
@@ -41,11 +48,15 @@ if not ret or first_frame is None:
 video_h, video_w, _ = first_frame.shape
 
 # --- Assign ROIs ---
+# Analyzing the right half of the UI per user instruction
+half_w = video_w // 2
+roi_w = video_w - half_w
+
 top_video_h = (video_h - bar_h) // 2
 bottom_video_h = (video_h - bar_h) - top_video_h
 
-render_roi = (0, 0, video_w, top_video_h)            # top = render
-scope_roi  = (0, top_video_h + bar_h, video_w, bottom_video_h)  # bottom = scope
+render_roi = (half_w, 0, roi_w, top_video_h)            # top-right = render
+scope_roi  = (half_w, top_video_h + bar_h, roi_w, bottom_video_h)  # bottom-right = scope
 
 print(f"Render ROI: {render_roi}")
 print(f"Scope ROI: {scope_roi}")
@@ -67,7 +78,9 @@ def compute_optical_flow(prev, curr, scale=1.0):
                                         iterations=3, poly_n=5, poly_sigma=1.2,
                                         flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
     horiz = flow[...,0] / scale
-    return horiz
+    vert = flow[...,1] / scale
+    mag = np.sqrt(horiz**2 + vert**2)
+    return mag
 
 def detect_large_motion(flow, min_pixels=min_blob_pixels, min_motion=min_blob_motion_px):
     mask = np.abs(flow) >= min_motion
@@ -124,15 +137,15 @@ while True:
     # --- Draw overlays ---
     vis_frame = frame.copy()
 
-    # Draw scope blobs (bottom)
+    # Draw scope blobs (bottom-right)
     for blob_stats in scope_blobs:
         x, y, w, h, area = blob_stats
-        cv2.rectangle(vis_frame, (x, y + render_roi[3] + bar_h), (x + w, y + h + render_roi[3] + bar_h), (0,255,0), 2)
+        cv2.rectangle(vis_frame, (x + half_w, y + render_roi[3] + bar_h), (x + half_w + w, y + h + render_roi[3] + bar_h), (0,255,0), 2)
 
-    # Draw render blobs (top)
+    # Draw render blobs (top-right)
     for blob_stats in render_blobs:
         x, y, w, h, area = blob_stats
-        cv2.rectangle(vis_frame, (x, y), (x + w, y + h), (255,0,0), 2)
+        cv2.rectangle(vis_frame, (x + half_w, y), (x + half_w + w, y + h), (255,0,0), 2)
 
     out.write(vis_frame)
 
@@ -149,19 +162,20 @@ render_signal = np.array(render_signal)
 # --- Sliding-window adaptive prominence ---
 all_peaks = []
 signal_abs = np.abs(render_signal)
-for start in range(0, len(signal_abs), prominence_window):
-    end = min(len(signal_abs), start + prominence_window)
-    local_sig = signal_abs[start:end]
+smoothed_signal = gaussian_filter1d(signal_abs, sigma=3)
+for start in range(0, len(smoothed_signal), prominence_window):
+    end = min(len(smoothed_signal), start + prominence_window)
+    local_sig = smoothed_signal[start:end]
     if len(local_sig) == 0:
         continue
     local_prominence = prominence_fraction * (np.max(local_sig) - np.min(local_sig))
     if local_prominence < 1e-3:
         continue
-    peaks = np.where((local_sig[1:-1] > local_sig[:-2]) & (local_sig[1:-1] > local_sig[2:]))[0] + 1
-    peaks = [p for p in peaks if local_sig[p] - np.min(local_sig) >= local_prominence]
+    # robust peak finding on smoothed signal
+    peaks, _ = find_peaks(local_sig, prominence=local_prominence, distance=15)
     all_peaks.extend([p + start for p in peaks])
 
-all_peaks = np.array(all_peaks)
+all_peaks = np.unique(all_peaks)
 
 # --- Compute local lag per peak, ignore positive lags ---
 local_lags = []
@@ -181,19 +195,27 @@ for peak in all_peaks:
         y0, y1, y2 = corr[peak_idx-1], corr[peak_idx], corr[peak_idx+1]
         local_lag += 0.5 * (y0 - y2) / (y0 - 2*y1 + y2)
 
-    # Only negative lag
-    if local_lag <= 0:
-        local_lags.append(local_lag)
+    # Only negative lag (scope should lead render)
+    # A positive lag means the render moved BEFORE the scope, which is impossible.
+    if local_lag < 0:
+        local_lags.append(-local_lag) # store as a positive latency value
+    else:
+        local_lags.append(np.nan) # Mark invalid so we can keep arrays aligned for plotting
+
+# filter out nans
+valid_lags = [l for l in local_lags if not np.isnan(l)]
 
 # --- Compute final latency ---
-if len(local_lags) == 0:
+if len(valid_lags) == 0:
     print("No valid motion peaks detected.")
+    latency_ms = 0.0
+    std_ms = 0.0
 else:
-    local_lags = np.array(local_lags)
-    latency_frames = np.mean(local_lags)
+    valid_lags = np.array(valid_lags)
+    latency_frames = np.mean(valid_lags)
     latency_ms = (latency_frames / fps) * 1000
-    std_ms = (np.std(local_lags) / fps) * 1000
-    print(f"\nAverage latency (scope faster only): {latency_ms:.1f} ms ± {std_ms:.1f} ms ({latency_frames:.2f} frames)")
+    std_ms = (np.std(valid_lags) / fps) * 1000
+    print(f"\nAverage latency (scope leading render): {latency_ms:.1f} ms ± {std_ms:.1f} ms ({latency_frames:.2f} frames)")
 
 # --- Plot motion signals with peak lines ---
 import matplotlib.pyplot as plt
@@ -201,10 +223,14 @@ plt.figure(figsize=(12,4))
 plt.plot(scope_signal, label="Scope (bottom)")
 plt.plot(render_signal, label="Render (top)")
 for peak, lag in zip(all_peaks, local_lags):
-    plt.axvline(x=peak - lag, color='red', linestyle='--', alpha=0.5)
+    if not np.isnan(lag):
+        # We stored lag as a positive latency value, so render lags scope by 'lag' frames.
+        # So scope peaked at (peak - lag).
+        plt.axvline(x=peak - lag, color='red', linestyle='--', alpha=0.5)
 plt.xlabel("Frame index")
 plt.ylabel("Mean horizontal motion (px of largest blob)")
 plt.title(f"Scope vs Render | Avg latency = {latency_ms:.1f} ms ± {std_ms:.1f} ms")
 plt.legend()
 plt.tight_layout()
+plt.savefig(os.path.expanduser("~/Downloads/latency_graph.png"))
 plt.show()
